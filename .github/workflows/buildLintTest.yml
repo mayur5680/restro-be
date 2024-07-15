@@ -1,0 +1,61 @@
+name: Build, Lint, Test
+
+on:
+  workflow_call:
+  push:
+      branches: [main]
+  pull_request:
+      branches: [main]
+      types: [opened, reopened, synchronize, ready_for_review]
+  workflow_dispatch:
+jobs:
+    Build-Lint-Test:
+        runs-on: ubuntu-latest
+        if: ${{ !github.event.pull_request.draft }}
+
+        steps:
+            - name: Pin Node to 18
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 18.16
+                  always-auth: true
+
+            - name: Get yarn cache directory path
+              id: yarn-cache-dir-path
+              run: echo "dir=$(yarn cache dir)" >> $GITHUB_OUTPUT
+
+            - uses: actions/cache@v4
+              with:
+                  path: ${{ steps.yarn-cache-dir-path.outputs.dir }}
+                  key: ${{ runner.os }}-yarn-${{ hashFiles('**/yarn.lock') }}
+                  restore-keys: |
+                      ${{ runner.os }}-yarn-
+
+            - name: Set up AWS
+              uses: guzmanygomez/github-actions/setup-aws-config@main
+              with:
+                  AWS_KEY: ${{ secrets.AWS_CODEARTIFACT_KEY }}
+                  AWS_SECRET: ${{ secrets.AWS_CODEARTIFACT_SECRET }}
+                  AWS_REGION: ${{ secrets.AWS_CODEARTIFACT_REGION }}
+
+            - name: Set up AWS CodeArtifact
+              uses: guzmanygomez/github-actions/code-artifact@main
+
+            - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Install Node Modules
+              run: yarn install
+
+            - name: Build
+              run: yarn build
+
+            - name: Lint
+              run: yarn lint
+
+            - name: Test
+              run: yarn test
+
+
+

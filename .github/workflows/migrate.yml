@@ -1,0 +1,151 @@
+name: Migrate
+run-name: Migrate to ${{ inputs.gyg_region }} / ${{ inputs.gyg_env }} by @${{ github.actor }} from ref > "${{ github.ref_name}}"
+
+on:
+    workflow_dispatch:
+        inputs:
+            gyg_env:
+                description: 'GYG_ENV (test, prod)'
+                required: true
+                default: 'test' 
+                type: choice
+                options:
+                - test
+                - prod
+            gyg_region:
+                description: 'GYG_REGION (australia)'
+                required: true
+                default: 'australia' 
+                type: choice
+                options:
+                - australia
+         
+jobs:
+    PrepareParameter:
+        runs-on: ubuntu-latest
+        env:
+            GYG_ENV: ${{ github.event.inputs.gyg_env }}
+            GYG_REGION: ${{ github.event.inputs.gyg_region }}
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+            - name: Prepare vpn profile secret key id
+              id: prepare-vpn-profile
+              run: |
+                  if [ $GYG_ENV == 'prod' ];
+                  then echo 'vpn_profile_secret_key=VPN_PROFILE_PROD' >> $GITHUB_OUTPUT;
+                  else echo 'vpn_profile_secret_key=VPN_PROFILE' >> $GITHUB_OUTPUT;
+                  fi
+            - name: Prepare database password key
+              id: prepare-db-password-key
+              run: |
+                  if [ $GYG_ENV == 'prod' ];
+                  then 
+                    if [ $GYG_REGION == 'australia' ];
+                    then echo 'db_password_secret_key=DB_PASSWORD_R365_PROD_AUSTRALIA' >> $GITHUB_OUTPUT;
+                    else echo 'db_password_secret_key=DB_PASSWORD_R365_PROD_USA' >> $GITHUB_OUTPUT;
+                    fi
+                  else
+                    if [ $GYG_REGION == 'australia' ];
+                    then echo 'db_password_secret_key=DB_PASSWORD_R365_TEST_AUSTRALIA' >> $GITHUB_OUTPUT;
+                    else echo 'db_password_secret_key=DB_PASSWORD_R365_TEST_USA' >> $GITHUB_OUTPUT;
+                    fi 
+                  fi
+        outputs:
+            vpn_profile_secret_key: ${{ steps.prepare-vpn-profile.outputs.vpn_profile_secret_key }}
+            db_password_secret_key: ${{ steps.prepare-db-password-key.outputs.db_password_secret_key }}
+
+    MigrateDatabase:
+        needs:
+            - PrepareParameter
+        runs-on: ubuntu-latest
+        environment:
+            name: "${{ github.event.inputs.gyg_env }}_${{ github.event.inputs.gyg_region }}"
+        steps:
+            - name: Setup AWS_REGION
+              id: aws-region
+              run: |
+                if [[ "${{ github.event.inputs.gyg_region }}" == "usa" ]];
+                then
+                  echo "AWS_REGION=us-east-2" >> $GITHUB_OUTPUT
+                elif [[ "${{ github.event.inputs.gyg_region }}" == "australia" ]];
+                then
+                  echo "AWS_REGION=ap-southeast-2" >> $GITHUB_OUTPUT
+                elif [[ "${{ github.event.inputs.gyg_region }}" == "singapore" ]];
+                then
+                  echo "AWS_REGION=ap-southeast-1" >> $GITHUB_OUTPUT
+                fi
+              shell: bash            
+
+            - name: Pin Node to 18
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 18.16
+                  always-auth: true
+
+            - name: Get yarn cache directory path
+              id: yarn-cache-dir-path
+              run: echo "dir=$(yarn cache dir)" >> $GITHUB_OUTPUT
+
+            - uses: actions/cache@v4
+              with:
+                  path: ${{ steps.yarn-cache-dir-path.outputs.dir }}
+                  key: ${{ runner.os }}-yarn-${{ hashFiles('**/yarn.lock') }}
+                  restore-keys: |
+                      ${{ runner.os }}-yarn-
+
+            - name: Set up AWS
+              uses: guzmanygomez/github-actions/setup-aws-config@main
+              with:
+                  AWS_KEY: ${{ secrets.AWS_CODEARTIFACT_KEY }}
+                  AWS_SECRET: ${{ secrets.AWS_CODEARTIFACT_SECRET }}
+                  AWS_REGION: ${{ secrets.AWS_CODEARTIFACT_REGION }}
+            
+            - name: Set up AWS CodeArtifact
+              uses: guzmanygomez/github-actions/code-artifact@main
+
+            - name: Set up vpn profile
+            # Need to let openvpn run in backgroup with --daemon because openvpn will take the main terminal thread until session is close
+            # Terminal thread will not move to next step until the openvpn session is close
+              run: |
+                sudo apt update
+                sudo apt-get install -y openvpn
+                echo "${{ secrets[needs.PrepareParameter.outputs.vpn_profile_secret_key] }}" > /tmp/vpn_profile.ovpn
+                sudo openvpn --config /tmp/vpn_profile.ovpn --daemon
+
+            - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Install Node Modules
+              run: yarn install
+
+            - name: Build
+              run: yarn build
+
+            - name: Migrate
+              env:
+                GYG_ENV: ${{ inputs.gyg_env }}
+                R365_DB_HOST: ${{ vars.DB_HOST_R365 }}
+                R365_DB_PORT: ${{ vars.DB_PORT_R365 }}
+                R365_DB_NAME: ${{ vars.DB_NAME_R365 }}
+                R365_DB_USER: ${{ vars.DB_USER_R365 }}
+                R365_DB_PASSWORD: ${{ secrets[needs.PrepareParameter.outputs.db_password_secret_key] }}
+              run: yarn typeorm:run-migration:r365
+
+            
+    Notify-Slack:
+      needs: [MigrateDatabase]
+      runs-on: ubuntu-latest
+      if: always()
+      steps:
+        - name: Slack Notification
+          uses: rtcamp/action-slack-notify@v2
+          env:
+            SLACK_CHANNEL: r365-release
+            SLACK_COLOR: ${{ needs.MigrateDatabase.result == 'success' && 'good' || 'danger' }}
+            SLACK_TITLE: "Migrate to ${{ inputs.gyg_region }} / ${{ inputs.gyg_env }} by @${{ github.actor }} from ref > ${{ github.ref_name }}"
+            SLACK_MESSAGE: "Migrate to ${{ inputs.gyg_region }} / ${{ inputs.gyg_env }} by @${{ github.actor }} from ref > ${{ github.ref_name }} is ${{ needs.MigrateDatabase.result == 'success' && 'successful' || 'failed' }}"
+            SLACK_USERNAME: Github
+            SLACK_WEBHOOK: ${{ vars.GYG_ADMINSPHERE_SLACK_WEBHOOK }}

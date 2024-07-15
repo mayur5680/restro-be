@@ -1,0 +1,169 @@
+name: Deploy WAF
+run-name: ${{ inputs.action }} ${{ inputs.gyg_region }} / ${{ inputs.gyg_platform }}.${{ inputs.gyg_env }}
+
+on:
+    workflow_dispatch:
+        inputs:
+            gyg_platform:
+                description: 'GYG_PLATFORM (ops)'
+                required: true
+                default: 'ops'
+                type: choice
+                options:
+                - ops
+            gyg_env:
+                description: 'GYG_ENV (test, prod)'
+                required: true
+                default: 'test' 
+                type: choice
+                options:
+                - test
+                - prod
+            gyg_region:
+                description: 'GYG_REGION (australia, usa)'
+                required: true
+                default: 'australia' 
+                type: choice
+                options:
+                - australia
+                - usa
+            action:
+              description: 'Run Infra Diff or Deploy'
+              required: true
+              default: 'Diff'
+              type: choice
+              options:
+                - Diff
+                - Deploy                
+            passphrase:
+                description: 'Required passphrase when deploying to production'
+                required: false         
+
+jobs:
+    Only-Deploy-Prod-Tag:
+        runs-on: ubuntu-latest
+        steps:
+          - name: Deploy Prod from Tag only
+            run: |
+              if [ ${{ inputs.gyg_env }} == 'prod' ] && [ ${{ github.ref_type }} != 'tag' ]; then
+                exit 1;
+              fi
+    DeployBE:
+        needs: Only-Deploy-Prod-Tag
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Allow production deploy 
+              if: ${{ github.event.inputs.gyg_env == 'prod' }}
+              run: |
+                echo "Production deployment. Checking for passphrase..."
+                if ! [[ "${{ github.event.inputs.passphrase }}" == "${{ secrets.BHYVE_DEPLOY_PROD_PASSPHRASE }}" ]];
+                then
+                  echo "Production deploy requires the correct passphrase to be entered."
+                  exit 1;
+                fi
+              shell: bash
+
+            - name: Setup AWS_REGION
+              id: aws-region
+              run: |
+                if [[ "${{ github.event.inputs.gyg_region }}" == "usa" ]];
+                then
+                  echo "AWS_REGION=us-east-2" >> $GITHUB_OUTPUT
+                elif [[ "${{ github.event.inputs.gyg_region }}" == "australia" ]];
+                then
+                  echo "AWS_REGION=ap-southeast-2" >> $GITHUB_OUTPUT
+                elif [[ "${{ github.event.inputs.gyg_region }}" == "singapore" ]];
+                then
+                  echo "AWS_REGION=ap-southeast-1" >> $GITHUB_OUTPUT
+                fi
+              shell: bash            
+
+            - name: Pin Node to 18
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 18
+
+            - name: Get yarn cache directory path
+              id: yarn-cache-dir-path
+              run: echo "dir=$(yarn cache dir)" >> $GITHUB_OUTPUT
+
+            - uses: actions/cache@v4
+              id: yarn-cache
+              with:
+                  path: ${{ steps.yarn-cache-dir-path.outputs.dir }}
+                  key: ${{ runner.os }}-yarn-${{ hashFiles('**/yarn.lock') }}
+                  restore-keys: |
+                      ${{ runner.os }}-yarn-
+
+            - name: Set up AWS
+              uses: guzmanygomez/github-actions/setup-aws-config@main
+              with:
+                  AWS_KEY: ${{ secrets.AWS_CODEARTIFACT_KEY }}
+                  AWS_SECRET: ${{ secrets.AWS_CODEARTIFACT_SECRET }}
+                  AWS_REGION: ${{ secrets.AWS_CODEARTIFACT_REGION }}
+
+            - name: Set up AWS CodeArtifact
+              uses: guzmanygomez/github-actions/code-artifact@main
+
+            - name: Extract branch name
+              shell: bash
+              run: echo "branch=$(echo ${GITHUB_REF#refs/heads/})" >> $GITHUB_OUTPUT
+              id: extract_branch
+
+            - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+                  ref: ${{ steps.extract_branch.outputs.branch }}
+
+            - name: Install Node Modules
+              run: yarn install
+
+            - name: Set up AWS Test
+              if: ${{ github.event.inputs.gyg_env == 'test' }}
+              uses: guzmanygomez/github-actions/setup-aws-config@main
+              with:
+                  AWS_KEY: ${{ secrets.AWS_OPS_TEST_DEPLOY_KEY }}
+                  AWS_SECRET: ${{ secrets.AWS_OPS_TEST_DEPLOY_SECRET }}
+                  AWS_REGION: ${{ secrets.AWS_OPS_TEST_DEPLOY_REGION }}
+
+            - name: Set up AWS Prod
+              if: ${{ github.event.inputs.gyg_env == 'prod' }}
+              uses: guzmanygomez/github-actions/setup-aws-config@main
+              with:
+                  AWS_KEY: ${{ secrets.AWS_OPS_PRODUCTION_DEPLOY_KEY }}
+                  AWS_SECRET: ${{ secrets.AWS_OPS_PRODUCTION_DEPLOY_SECRET }}
+                  AWS_REGION: ${{ secrets.AWS_OPS_PRODUCTION_DEPLOY_REGION }}
+
+            - name: Diff ECS Stack
+              env:
+                GYG_PLATFORM: ${{ inputs.gyg_platform }}
+                GYG_ENV: ${{ inputs.gyg_env }}
+                GYG_REGION: ${{ inputs.gyg_region }}
+              run: yarn cdk:waf:build && yarn cdk:diff
+                                  
+            - name: Deploy WAF Stack
+              if: ${{ inputs.action == 'Deploy' }}
+              env:
+                GYG_PLATFORM: ${{ inputs.gyg_platform }}
+                GYG_ENV: ${{ inputs.gyg_env }}
+                GYG_REGION: ${{ inputs.gyg_region }}
+                AWS_REGION: ${{ steps.aws-region.outputs.AWS_REGION }}
+              run: |
+                yarn cdk:waf:deploy
+
+    Notify-Slack:
+      needs: DeployBE
+      runs-on: ubuntu-latest
+      if: ${{ always() && inputs.action == 'Deploy' }}
+      steps:
+        - name: Slack Notification
+          uses: rtcamp/action-slack-notify@v2
+          env:
+            SLACK_CHANNEL: r365-release
+            SLACK_COLOR: ${{ needs.DeployBE.result }}
+            SLACK_TITLE: 'Deploy Resto365 BE WAF ${{ needs.DeployBE.result }}'
+            SLACK_MESSAGE: "Deploy Resto365 BE WAF branch/tag '${{ github.ref }}' in ${{ inputs.gyg_platform }}/${{ inputs.gyg_env }}/${{ inputs.gyg_region }}"
+            SLACK_USERNAME: Github
+            SLACK_WEBHOOK: ${{ vars.GYG_ADMINSPHERE_SLACK_WEBHOOK }}
+              

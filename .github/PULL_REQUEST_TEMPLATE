@@ -1,0 +1,13 @@
+## What it does, and why
+
+<!-- Add a thorough explanation of what the code in this PR does in this section. Make sure to also cover why your changes are necessary and useful. -->
+
+<!-- Is there anything not straightforward in the code? Explain it. If you choose to use a pattern rather than another, use this space to provide the reason for your choice. -->
+
+## Testing
+
+<!-- Explain how to test the changes in detail. -->
+
+## Jira Tickets
+
+<!-- If this PR implements changes related to one or more Jira tickets please add them here: -->

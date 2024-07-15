@@ -1,0 +1,41 @@
+version: '3.7'
+
+services:
+  api:
+    container_name: resto365-be
+    image: gyg-resto365-be
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - .:/app
+      - /app/node_modules
+    env_file:
+      - docker.env
+    ports:
+      - 3000:3000
+    depends_on:
+      - mysql
+    networks:
+      - backend
+    healthcheck:
+      test: ['CMD-SHELL', 'mysqladmin ping -h localhost -u root -p1qazXSW@3edc']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mysql:
+    container_name: resto365-sql
+    image: mysql:latest
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: 1qazXSW@3edc
+      MYSQL_DATABASE: resto365
+    ports:
+      - 3306:3306
+    networks:
+      - backend
+
+networks:
+  backend:
